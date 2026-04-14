@@ -1,0 +1,146 @@
+# Hexapod Configuration
+# Single source of truth for all hardware constants, wiring, and tuning parameters.
+
+# ─── Hardware ────────────────────────────────────────────────────────────────
+hardware:
+  platform: Raspberry Pi 5
+  servo_drivers:
+    - type: PCA9685
+      label: left
+      i2c_address: 0x40   # default I2C address (A0-A2 all low)
+    - type: PCA9685
+      label: right
+      i2c_address: 0x41   # A0 pulled high
+
+# ─── Servo Calibration ───────────────────────────────────────────────────────
+servo:
+  pwm_frequency_hz: 50
+  pulse_min_us: 500
+  pulse_max_us: 2500
+  angle_range_deg: [0, 180]
+  # LF knee uses a slightly different servo that needs a wider pulse range
+  overrides:
+    LF_knee_pulse_max_us: 2700
+    LM_knee_pulse_max_us: 2700
+    LB_knee_pulse_max_us: 2700
+
+# ─── Wiring ──────────────────────────────────────────────────────────────────
+# Each leg has three servos: pan (yaw), hip (pitch), knee (pitch).
+# Channel numbers refer to the PCA9685 channel on that leg's board.
+# Left legs are mirror-mounted: hardware angle = 180 - logical angle.
+#
+# Leg naming convention:
+#   L = Left,  R = Right
+#   F = Front, M = Mid,  B = Back
+#
+# Board layout (top view, front of robot is +x):
+#
+#         [LF]   [RF]
+#         [LM]   [RM]
+#         [LB]   [RB]
+
+legs:
+  LF:
+    board: left           # PCA9685 at 0x40
+    pan_ch:   2
+    hip_ch:   1
+    knee_ch:  0
+    mirror: true          # hardware angle = 180 - logical angle
+    mount_xyz_mm: [60.0, 55.0, 0.0]   # leg base offset from body center [x, y, z]
+    pan_neutral_deg: 90.0
+
+  LM:
+    board: left
+    pan_ch:   6
+    hip_ch:   5
+    knee_ch:  4
+    mirror: true
+    mount_xyz_mm: [0.0, 65.0, 0.0]
+    pan_neutral_deg: 90.0
+
+  LB:
+    board: left
+    pan_ch:   10
+    hip_ch:   9
+    knee_ch:  8
+    mirror: true
+    mount_xyz_mm: [-60.0, 55.0, 0.0]
+    pan_neutral_deg: 90.0
+
+  RF:
+    board: right          # PCA9685 at 0x41
+    pan_ch:   6
+    hip_ch:   5
+    knee_ch:  4
+    mirror: false
+    mount_xyz_mm: [60.0, -55.0, 0.0]
+    pan_neutral_deg: 90.0
+
+  RM:
+    board: right
+    pan_ch:   10
+    hip_ch:   9
+    knee_ch:  8
+    mirror: false
+    mount_xyz_mm: [0.0, -65.0, 0.0]
+    pan_neutral_deg: 90.0
+
+  RB:
+    board: right
+    pan_ch:   14
+    hip_ch:   13
+    knee_ch:  12
+    mirror: false
+    mount_xyz_mm: [-60.0, -55.0, 0.0]
+    pan_neutral_deg: 90.0
+
+# ─── Kinematics ──────────────────────────────────────────────────────────────
+# Coordinate frame per leg (local, origin at leg base mount point):
+#   x: forward (along robot heading)
+#   y: outward (away from body centerline)
+#   z: up
+kinematics:
+  link_lengths_mm:
+    coxa: 55.0    # L1: pan joint → hip joint
+    femur: 85.0   # L2: hip joint → knee joint (+ tibia in 2-link model)
+
+# ─── Joint Limits (servo space, degrees) ─────────────────────────────────────
+limits:
+  hip:  [10.0, 170.0]
+  knee: [10.0, 170.0]
+  # Pan swing is relative to neutral. Front/Back legs get more outward swing.
+  pan_inward_deg: 15.0
+  pan_outward_front_back_deg: 45.0
+  pan_outward_mid_deg: 15.0
+
+# ─── Poses (logical angles, degrees) ─────────────────────────────────────────
+poses:
+  neutral:
+    pan:  90.0
+    hip:  90.0
+    knee: 90.0
+  sit:
+    pan:  90.0
+    hip:  165.0
+    knee: 0.0    # clamped to knee_min=10 at runtime
+  stand:
+    pan:  90.0
+    hip:  89.0
+    knee: 10.0
+
+# ─── Motion Control ──────────────────────────────────────────────────────────
+control:
+  loop_rate_hz: 50          # 0.02s per tick
+  max_speed_deg_s: 120.0    # servo rate limit
+  angle_epsilon_deg: 0.5    # "close enough" threshold for target reached
+
+# ─── Gait Parameters ─────────────────────────────────────────────────────────
+gait:
+  tripod:
+    # Group A lifts while Group B is in stance, then they swap.
+    group_a: [RF, LM, LB]
+    group_b: [LF, RM, RB]
+    lift_height_mm: 30.0
+    step_length_mm: 40.0
+    swing_ticks: 20       # ticks per lift-move-lower phase at 50 Hz
+    duty_cycle: 0.5       # fraction of cycle in stance
