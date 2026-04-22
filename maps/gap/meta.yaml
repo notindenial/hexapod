@@ -1,0 +1,21 @@
+# Corridor map. Sigmoid walls at |y| > 165 mm for x > -10 mm.
+# At yaw=0 the outer feet reach ±183.6 mm (blocked). A ~26° yaw reduces
+# that to ±165 mm (just fits). The planner must yaw, strafe through the
+# corridor, then yaw back and continue to goal.
+name: gap
+grid:
+  nx: 40
+  ny: 30
+  cell_size_mm: 20.0
+  origin_x_mm: -390.0
+  origin_y_mm: -290.0
+
+start:
+  x_mm: -300.0
+  y_mm: 0.0
+  yaw_deg: 0.0
+
+goal:
+  x_mm: 300.0
+  y_mm: 0.0
+  tolerance_mm: 40.0

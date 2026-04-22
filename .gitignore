@@ -1,0 +1,15 @@
+# Compiled binaries
+planner/planner
+planner/build/
+
+# Generated outputs
+maps/*/plan.gif
+maps/*/preview.png
+plan.txt
+plan_*.txt
+plan.gif
+
+# Python cache
+__pycache__/
+sim/__pycache__/
+*.pyc

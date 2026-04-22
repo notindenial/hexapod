@@ -1,0 +1,18 @@
+# Flat terrain test map.
+name: flat
+grid:
+  nx: 40
+  ny: 30
+  cell_size_mm: 20.0
+  origin_x_mm: -390.0   # world x of cell (0,0) center
+  origin_y_mm: -290.0   # world y of cell (0,0) center
+
+start:
+  x_mm: -300.0
+  y_mm: 0.0
+  yaw_deg: 0.0
+
+goal:
+  x_mm: 300.0
+  y_mm: 0.0
+  tolerance_mm: 40.0

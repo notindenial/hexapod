@@ -39,6 +39,9 @@ servo:
 #         [LM]   [RM]
 #         [LB]   [RB]
 
+#   mount_xyz_mm : pan-axis origin in body frame (mm)
+#   mount_yaw_deg: rotation from body +x to leg-local +x about z (deg)
+#                  — leg-local +x is the outward direction at neutral pan.
 legs:
   LF:
     board: left           # PCA9685 at 0x40
@@ -46,7 +49,8 @@ legs:
     hip_ch:   1
     knee_ch:  0
     mirror: true          # hardware angle = 180 - logical angle
-    mount_xyz_mm: [60.0, 55.0, 0.0]   # leg base offset from body center [x, y, z]
+    mount_xyz_mm:  [45.0, 68.6, 0.0]
+    mount_yaw_deg:  45.0
     pan_neutral_deg: 90.0
 
   LM:
@@ -55,7 +59,8 @@ legs:
     hip_ch:   5
     knee_ch:  4
     mirror: true
-    mount_xyz_mm: [0.0, 65.0, 0.0]
+    mount_xyz_mm:  [0.0, 73.6, 0.0]
+    mount_yaw_deg:  90.0
     pan_neutral_deg: 90.0
 
   LB:
@@ -64,7 +69,8 @@ legs:
     hip_ch:   9
     knee_ch:  8
     mirror: true
-    mount_xyz_mm: [-60.0, 55.0, 0.0]
+    mount_xyz_mm:  [-45.0, 68.6, 0.0]
+    mount_yaw_deg:  135.0
     pan_neutral_deg: 90.0
 
   RF:
@@ -73,7 +79,8 @@ legs:
     hip_ch:   5
     knee_ch:  4
     mirror: false
-    mount_xyz_mm: [60.0, -55.0, 0.0]
+    mount_xyz_mm:  [45.0, -68.6, 0.0]
+    mount_yaw_deg:  -45.0
     pan_neutral_deg: 90.0
 
   RM:
@@ -82,7 +89,8 @@ legs:
     hip_ch:   9
     knee_ch:  8
     mirror: false
-    mount_xyz_mm: [0.0, -65.0, 0.0]
+    mount_xyz_mm:  [0.0, -73.6, 0.0]
+    mount_yaw_deg:  -90.0
     pan_neutral_deg: 90.0
 
   RB:
@@ -91,18 +99,30 @@ legs:
     hip_ch:   13
     knee_ch:  12
     mirror: false
-    mount_xyz_mm: [-60.0, -55.0, 0.0]
+    mount_xyz_mm:  [-45.0, -68.6, 0.0]
+    mount_yaw_deg:  -135.0
     pan_neutral_deg: 90.0
 
 # ─── Kinematics ──────────────────────────────────────────────────────────────
-# Coordinate frame per leg (local, origin at leg base mount point):
-#   x: forward (along robot heading)
-#   y: outward (away from body centerline)
-#   z: up
+# Per-leg frame (leg-local, origin at pan axis):
+#   +x : radially outward at neutral pan
+#   +y : tangent (pan rotation direction)
+#   +z : up
+#
+# Kinematic chain:
+#   pan (vertical axis) → coxa offset (coxa_lateral outward, coxa_drop down)
+#   → hip (horizontal axis) → femur → knee (horizontal axis ‖ hip) → tibia → foot tip
+#
+# Angle conventions (logical, degrees):
+#   pan   = pan_neutral + pan_geom           (pan_geom: azimuth in leg-local xy)
+#   hip   = hip_neutral + hip_geom           (hip_geom: femur elevation from horizontal, + toward +z)
+#   knee  = interior angle at knee vertex    (180° = straight leg, 90° = L-bent)
 kinematics:
-  link_lengths_mm:
-    coxa: 55.0    # L1: pan joint → hip joint
-    femur: 85.0   # L2: hip joint → knee joint (+ tibia in 2-link model)
+  coxa_lateral_mm: 54.0        # pan axis → hip axis, horizontal component
+  coxa_drop_mm:    34.0        # hip axis below thorax plane (fixed L-bend, not a DOF)
+  femur_mm:        74.0        # hip axis → knee axis
+  tibia_mm:        107.0       # knee axis → foot tip
+  stand_clearance_mm: 50.0     # thorax center → ground at stand
 
 # ─── Joint Limits (servo space, degrees) ─────────────────────────────────────
 limits:
@@ -114,19 +134,28 @@ limits:
   pan_outward_mid_deg: 15.0
 
 # ─── Poses (logical angles, degrees) ─────────────────────────────────────────
+# With the 3-link convention:
+#   hip_geom = hip - 90   (femur elevation: + = up from horizontal)
+#   knee     = interior angle at knee (180 = straight, 90 = L-bent)
 poses:
   neutral:
-    pan:  90.0
-    hip:  90.0
-    knee: 90.0
-  sit:
-    pan:  90.0
-    hip:  165.0
-    knee: 0.0    # clamped to knee_min=10 at runtime
+    pan:  90.0     # leg straight outward
+    hip:  90.0     # femur horizontal
+    knee: 90.0     # tibia perpendicular (foot hangs down 107 mm below knee)
   stand:
+    # Target foot in leg-local frame: (110, 0, -80) — legs closer in, 80 mm clearance.
+    # Via IK (knee-up branch): knee_inner ≈ 43°, femur elevation ≈ 55°.
     pan:  90.0
-    hip:  89.0
-    knee: 10.0
+    hip:  145.0
+    knee: 43.0
+    # Front/back legs angled 5° toward forward/backward respectively.
+    # Applied as: pan_geom_bias = -sign(mount_yaw)*bias for F, +sign(mount_yaw)*bias for B.
+    front_back_pan_bias_deg: 8.0
+  sit:
+    # Target foot in leg-local frame: (170, 0, 0) — legs extended, body low.
+    pan:  90.0
+    hip:  167.0
+    knee: 82.0
 
 # ─── Motion Control ──────────────────────────────────────────────────────────
 control:
@@ -138,8 +167,9 @@ control:
 gait:
   tripod:
     # Group A lifts while Group B is in stance, then they swap.
-    group_a: [RF, LM, LB]
-    group_b: [LF, RM, RB]
+    # Front + back of one side, center of the other side.
+    group_a: [RF, RB, LM]
+    group_b: [LF, LB, RM]
     lift_height_mm: 30.0
     step_length_mm: 40.0
     swing_ticks: 20       # ticks per lift-move-lower phase at 50 Hz

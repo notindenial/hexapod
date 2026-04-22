@@ -58,9 +58,11 @@ def make_sim_driver(leg_name: str, mirror: bool):
 # ─── Initialisation ──────────────────────────────────────────────────────────
 
 def init_legs(cfg: dict, sim: bool) -> dict[str, Leg]:
-    kin   = cfg["kinematics"]["link_lengths_mm"]
-    L1    = float(kin["coxa"])
-    L2    = float(kin["femur"])
+    kin   = cfg["kinematics"]
+    coxa_lateral = float(kin["coxa_lateral_mm"])
+    coxa_drop    = float(kin["coxa_drop_mm"])
+    femur        = float(kin["femur_mm"])
+    tibia        = float(kin["tibia_mm"])
     lims  = cfg["limits"]
     ctrl  = cfg["control"]
     servo = cfg["servo"]
@@ -81,6 +83,7 @@ def init_legs(cfg: dict, sim: bool) -> dict[str, Leg]:
         knee_ch = lcfg["knee_ch"]
         mirror  = lcfg.get("mirror", False)
         mount   = tuple(lcfg.get("mount_xyz_mm", [0.0, 0.0, 0.0]))
+        mount_yaw = float(lcfg.get("mount_yaw_deg", 0.0))
         pan_neu = float(lcfg.get("pan_neutral_deg", 90.0))
 
         if sim:
@@ -104,13 +107,16 @@ def init_legs(cfg: dict, sim: bool) -> dict[str, Leg]:
         legs[name] = Leg(
             driver,
             name=name,
-            L1_mm=L1,
-            L2_mm=L2,
+            coxa_lateral_mm=coxa_lateral,
+            coxa_drop_mm=coxa_drop,
+            femur_mm=femur,
+            tibia_mm=tibia,
             pan_neutral_deg=pan_neu,
             pan_limits=pan_lim,
             hip_limits=tuple(lims["hip"]),
             knee_limits=tuple(lims["knee"]),
             mount_xyz_mm=mount,
+            mount_yaw_deg=mount_yaw,
             max_speed_deg_s=float(ctrl["max_speed_deg_s"]),
             angle_epsilon_deg=float(ctrl["angle_epsilon_deg"]),
         )

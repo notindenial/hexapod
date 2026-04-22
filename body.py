@@ -80,8 +80,8 @@ class Body:
     """
 
     # Tripod gait groups — Group A and B alternate swing/stance
-    TRIPOD_A = ["RF", "LM", "LB"]
-    TRIPOD_B = ["LF", "RM", "RB"]
+    TRIPOD_A = ["RF", "RB", "LM"]
+    TRIPOD_B = ["LF", "LB", "RM"]
 
     def __init__(self, legs: Dict[str, Leg], cfg: dict) -> None:
         self.legs = legs
@@ -145,11 +145,11 @@ class Body:
                 continue
             foot_world = self._neutral_foot[name]
             mount = np.array(leg.mount_xyz_mm, dtype=float)
+            R_mount = _rot_z(math.radians(leg.mount_yaw_deg))
 
-            # Foot in body frame
+            # Foot in body frame, then unrotate mount_yaw to get leg-local
             foot_body = T_bw[:3, :3] @ foot_world + T_bw[:3, 3]
-            # Foot in leg-local frame
-            foot_local = foot_body - mount
+            foot_local = R_mount.T @ (foot_body - mount)
 
             leg.set_foot_xyz(*foot_local, immediate=immediate)
 
@@ -166,11 +166,11 @@ class Body:
 
         for leg in self.legs.values():
             leg.set_angles(pan, hip, knee, immediate=False)
-            # Compute and cache the foot position this corresponds to
-            fx, fy, fz = leg.fk(pan, hip, knee)
+            # Rotate leg-local FK result into body frame, then shift by mount
             mount = np.array(leg.mount_xyz_mm, dtype=float)
-            # Foot in world frame = mount + local foot (at neutral body pose)
-            self._neutral_foot[leg.name] = mount + np.array([fx, fy, fz])
+            R_mount = _rot_z(math.radians(leg.mount_yaw_deg))
+            foot_local = np.array(leg.fk(pan, hip, knee), dtype=float)
+            self._neutral_foot[leg.name] = mount + R_mount @ foot_local
 
         self._await_all(dt=dt, timeout_s=timeout_s)
 
@@ -211,8 +211,10 @@ class Body:
             self._phase[name] = Phase.SWING
             self._swing_tick[name] = 0
             leg = self.legs[name]
-            # Swing start = current foot position
-            self._swing_start[name] = np.array(leg.foot_xyz_mm, dtype=float)
+            # Swing start = current foot in world frame
+            mount = np.array(leg.mount_xyz_mm, dtype=float)
+            R_mount = _rot_z(math.radians(leg.mount_yaw_deg))
+            self._swing_start[name] = mount + R_mount @ np.array(leg.foot_xyz_mm, dtype=float)
             # Swing end = neutral + forward offset from velocity
             self._swing_end[name] = np.array(self._neutral_foot.get(
                 name, np.array(leg.foot_xyz_mm)
@@ -254,10 +256,11 @@ class Body:
         z  = start[2] + self._lift_height * math.sin(math.pi * t)
 
         mount = np.array(leg.mount_xyz_mm, dtype=float)
-        local = xy - mount
-        local[2] = z - mount[2]
+        R_mount = _rot_z(math.radians(leg.mount_yaw_deg))
+        world_pos = np.array([xy[0], xy[1], z])
+        foot_local = R_mount.T @ (world_pos - mount)
 
-        leg.set_foot_xyz(local[0], local[1], local[2])
+        leg.set_foot_xyz(*foot_local)
         self._swing_tick[name] += 1
 
     def _update_stance(self, name: str, leg: Leg, dt: float) -> None:

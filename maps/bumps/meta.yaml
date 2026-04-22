@@ -1,0 +1,22 @@
+# Two finite diagonal bumps blocking the straight-line path, each oriented at
+# ±45°. Bump 1 at (-100, 0) runs NE-SW; bump 2 at (+100, 0) runs NW-SE.
+# Each is a Gaussian ellipsoid (length=80 mm along axis, width=25 mm across,
+# peak=35 mm). The planner must zigzag — detour south around bump 1, then
+# north around bump 2 (or the mirror).
+name: bumps
+grid:
+  nx: 40
+  ny: 30
+  cell_size_mm: 20.0
+  origin_x_mm: -390.0
+  origin_y_mm: -290.0
+
+start:
+  x_mm: -300.0
+  y_mm: 0.0
+  yaw_deg: 0.0
+
+goal:
+  x_mm: 300.0
+  y_mm: 0.0
+  tolerance_mm: 40.0
