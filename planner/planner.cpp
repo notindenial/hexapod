@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -139,6 +140,41 @@ struct Map {
     Terrain terrain;
     double start_x = 0, start_y = 0, start_yaw_deg = 0;
     double goal_x = 0, goal_y = 0, goal_tol = 40.0;
+};
+
+// Precomputed 2D admissible heuristic — cost-to-go from each body (x,y) cell
+// to the goal, assuming a relaxed "point-robot on terrain" problem. Built
+// once by backward Dijkstra from the goal over the heightmap; queried by
+// the real planner via bilinear lookup. Replaces the old Euclidean heuristic
+// which was blind to terrain and mis-priced detours around full-span obstacles.
+struct HeuristicGrid {
+    int nx = 0, ny = 0;
+    double cell = 0.0;
+    double origin_x = 0.0, origin_y = 0.0;
+    std::vector<double> h;  // row-major, h[j*nx + i] = cost-to-go
+
+    double lookup(double x_mm, double y_mm) const {
+        double fi = (x_mm - origin_x) / cell;
+        double fj = (y_mm - origin_y) / cell;
+        int i0 = std::max(0, std::min(nx - 1, (int)std::floor(fi)));
+        int j0 = std::max(0, std::min(ny - 1, (int)std::floor(fj)));
+        int i1 = std::min(nx - 1, i0 + 1);
+        int j1 = std::min(ny - 1, j0 + 1);
+        double tx = std::max(0.0, std::min(1.0, fi - i0));
+        double ty = std::max(0.0, std::min(1.0, fj - j0));
+        double h00 = h[j0 * nx + i0];
+        double h10 = h[j0 * nx + i1];
+        double h01 = h[j1 * nx + i0];
+        double h11 = h[j1 * nx + i1];
+        // If any corner is inf, fall back to nearest finite corner to keep
+        // the interpolation well-defined near unreachable regions.
+        double best = std::min(std::min(h00, h10), std::min(h01, h11));
+        if (!std::isfinite(best)) return std::numeric_limits<double>::infinity();
+        auto fx = [&](double v){ return std::isfinite(v) ? v : best; };
+        double h0 = fx(h00) * (1 - tx) + fx(h10) * tx;
+        double h1 = fx(h01) * (1 - tx) + fx(h11) * tx;
+        return h0 * (1 - ty) + h1 * ty;
+    }
 };
 
 static std::string strip(std::string s) {
@@ -269,9 +305,9 @@ struct Params {
     // advances the most per swing without being penalized.
     double c_swing    = 1.0;         // base cost per tripod swing
     double w_yaw_deg  = 0.02;        // small penalty per deg of yaw to discourage churn
-    double w_elev     = 0.05;        // per-mm elevation gain of new feet
+    double w_elev     = 0.20;        // per-mm elevation gain of new feet
     double w_stab     = 1.0;         // per-mm stability deficit
-    double w_rough    = 0.02;        // per-mm local terrain variation under new feet
+    double w_rough    = 0.08;        // per-mm local terrain variation under new feet
     double stab_margin_mm = 15.0;    // CoM must stay this far from nearest support edge
 };
 
@@ -480,12 +516,99 @@ static double transition_cost(const State& from, const State& to,
          + P.w_rough * rough;
 }
 
-static double heuristic(const State& s, const Map& m, const Params& P) {
-    double dx = m.goal_x - s.bx, dy = m.goal_y - s.by;
-    double dist = std::hypot(dx, dy);
-    double rem = std::max(0.0, dist - m.goal_tol);
-    // Minimum number of full-length swings to cover the remaining distance.
-    return P.c_swing * (rem / P.body_step_mm);
+// Build the 2D admissible heuristic by running backward Dijkstra from the
+// goal over the terrain grid. Edge cost = (cell_dist / body_step) * c_swing
+// + w_elev * max(0, Δh_going_forward). This is a strict lower bound on the
+// true per-swing cost the real planner pays (it ignores yaw, kinematics,
+// stability, and sums elevation over multiple feet → always admissible).
+static HeuristicGrid build_heuristic_grid(const Map& m, const Params& P) {
+    HeuristicGrid G;
+    G.nx = m.terrain.nx;
+    G.ny = m.terrain.ny;
+    G.cell = m.terrain.cell;
+    G.origin_x = m.terrain.origin_x;
+    G.origin_y = m.terrain.origin_y;
+    G.h.assign((size_t)G.nx * G.ny, std::numeric_limits<double>::infinity());
+
+    struct PQEntry { double cost; int i, j; };
+    auto cmp = [](const PQEntry& a, const PQEntry& b){ return a.cost > b.cost; };
+    std::priority_queue<PQEntry, std::vector<PQEntry>, decltype(cmp)> pq(cmp);
+
+    // Seed: every cell within goal_tol of the goal has h = 0.
+    int seeded = 0;
+    for (int j = 0; j < G.ny; j++) for (int i = 0; i < G.nx; i++) {
+        double wx = G.origin_x + i * G.cell;
+        double wy = G.origin_y + j * G.cell;
+        if (std::hypot(wx - m.goal_x, wy - m.goal_y) <= m.goal_tol) {
+            G.h[j * G.nx + i] = 0.0;
+            pq.push({0.0, i, j});
+            seeded++;
+        }
+    }
+    // Safety: if the goal-tol radius is smaller than a cell, seed the single
+    // nearest cell so the grid isn't empty.
+    if (seeded == 0) {
+        int ci = (int)std::round((m.goal_x - G.origin_x) / G.cell);
+        int cj = (int)std::round((m.goal_y - G.origin_y) / G.cell);
+        ci = std::max(0, std::min(G.nx - 1, ci));
+        cj = std::max(0, std::min(G.ny - 1, cj));
+        G.h[cj * G.nx + ci] = 0.0;
+        pq.push({0.0, ci, cj});
+    }
+
+    // 8-connected neighbours.
+    const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+    while (!pq.empty()) {
+        PQEntry e = pq.top(); pq.pop();
+        int i = e.i, j = e.j;
+        if (e.cost > G.h[j * G.nx + i]) continue;  // stale
+        double z_here = m.terrain.h[j * G.nx + i];
+        for (int k = 0; k < 8; k++) {
+            int ni = i + dx[k], nj = j + dy[k];
+            if (ni < 0 || ni >= G.nx || nj < 0 || nj >= G.ny) continue;
+            double z_next = m.terrain.h[nj * G.nx + ni];
+            double step_mm = G.cell * std::hypot((double)dx[k], (double)dy[k]);
+            // Forward direction is (ni,nj) → (i,j) since we're expanding
+            // backward from the goal, so elev gain = max(0, z_here - z_next).
+            double elev = std::max(0.0, z_here - z_next);
+            double step_cost = (step_mm / P.body_step_mm) * P.c_swing
+                             + P.w_elev * elev;
+            double nc = e.cost + step_cost;
+            if (nc < G.h[nj * G.nx + ni]) {
+                G.h[nj * G.nx + ni] = nc;
+                pq.push({nc, ni, nj});
+            }
+        }
+    }
+    return G;
+}
+
+// LRTA* learned bound: records per-state lower bounds discovered during
+// the real search. After an outer step from s, we set
+//     learned[s] ← max(learned[s], best_f_from_inner_search)
+// which is admissible because best_f is a Bellman backup of admissible
+// terminal heuristics. Over repeated visits to a local minimum, this
+// monotonically raises h until the planner gives up on the dead end.
+using LearnedH = std::unordered_map<StateKey, double, StateKeyHash>;
+
+// Recency / tabu set: the set of quantized state keys visited in the
+// last TABU_WINDOW outer steps. Any successor inside the inner search
+// whose key is in this set gets a per-edge penalty added to its step
+// cost — steering the planner away from immediately-revisiting states.
+// This is what breaks 2-cycle oscillation at a local minimum: the
+// Dijkstra heuristic says "back that way is closer" but the tabu
+// penalty overwhelms the h-difference for one or two steps, long
+// enough to commit past the minimum.
+using TabuSet = std::unordered_set<StateKey, StateKeyHash>;
+static constexpr double TABU_PENALTY = 8.0;  // ~8 free swings' worth
+
+static double heuristic(const State& s, const Map&, const Params& P,
+                        const HeuristicGrid& G, const LearnedH& L) {
+    double base = G.lookup(s.bx, s.by);
+    auto it = L.find(make_key(s, P));
+    return (it != L.end()) ? std::max(base, it->second) : base;
 }
 
 static bool at_goal(const State& s, const Map& m) {
@@ -510,7 +633,9 @@ struct SearchResult {
     int expansions;
 };
 
-static SearchResult inner_search(const State& start, const Map& m, const Params& P) {
+static SearchResult inner_search(const State& start, const Map& m,
+                                 const Params& P, const HeuristicGrid& G,
+                                 const LearnedH& L, const TabuSet& tabu) {
     SearchResult R{};
     R.first_action_idx = -1;
     R.best_f = std::numeric_limits<double>::infinity();
@@ -533,7 +658,7 @@ static SearchResult inner_search(const State& start, const Map& m, const Params&
     auto start_key = make_key(start, P);
     best_g[start_key] = 0.0;
     nodes.push_back({start, 0.0, 0, -1, start});
-    open.push({P.eps * heuristic(start, m, P), 0});
+    open.push({P.eps * heuristic(start, m, P, G, L), 0});
 
     while (!open.empty()) {
         auto [f, id] = open.top(); open.pop();
@@ -557,11 +682,15 @@ static SearchResult inner_search(const State& start, const Map& m, const Params&
             State s2 = apply_action(node.s, ACTIONS[ai], P, m.terrain);
             REJECT_REASON = "-";
             double step = transition_cost(node.s, s2, ACTIONS[ai], P, m.terrain);
+            // Tabu penalty: landing in a recently-visited state costs extra.
+            if (std::isfinite(step) && tabu.count(make_key(s2, P))) {
+                step += TABU_PENALTY;
+            }
             if (getenv("PLANNER_DEBUG") && node.depth == 0) {
                 std::cerr << "  [d0] " << ACTIONS[ai].name
                           << " step_cost=" << step
-                          << "  h=" << heuristic(s2, m, P)
-                          << "  f=" << (std::isfinite(step) ? step + P.eps*heuristic(s2, m, P) : step)
+                          << "  h=" << heuristic(s2, m, P, G, L)
+                          << "  f=" << (std::isfinite(step) ? step + P.eps*heuristic(s2, m, P, G, L) : step)
                           << "  reject=" << REJECT_REASON << "\n";
             }
             if (!std::isfinite(step)) continue;
@@ -574,7 +703,7 @@ static SearchResult inner_search(const State& start, const Map& m, const Params&
             int first_idx = (node.depth == 0) ? (int)ai : node.first_action_idx;
             State first_nxt = (node.depth == 0) ? s2 : node.first_next;
             nodes.push_back({s2, g2, node.depth + 1, first_idx, first_nxt});
-            double f2 = g2 + P.eps * heuristic(s2, m, P);
+            double f2 = g2 + P.eps * heuristic(s2, m, P, G, L);
             open.push({f2, nodes.size() - 1});
         }
     }
@@ -680,7 +809,12 @@ int main(int argc, char** argv) {
               << " cell=" << m.terrain.cell << "mm\n";
     std::cout << "Start (" << m.start_x << "," << m.start_y << ") yaw=" << m.start_yaw_deg << "\n";
     std::cout << "Goal  (" << m.goal_x << "," << m.goal_y << ") tol=" << m.goal_tol << "\n";
-    std::cout << "Horizon=" << P.horizon << " eps=" << P.eps << "\n\n";
+    std::cout << "Horizon=" << P.horizon << " eps=" << P.eps << "\n";
+
+    HeuristicGrid G = build_heuristic_grid(m, P);
+    double h_start = G.lookup(m.start_x, m.start_y);
+    std::cout << "Heuristic grid built (" << G.nx << "x" << G.ny
+              << ")  h(start) = " << h_start << "\n\n";
 
     State s = make_initial_state(m);
     std::vector<State> plan = { s };
@@ -688,12 +822,58 @@ int main(int argc, char** argv) {
     double total_cost = 0.0;
     int total_expansions = 0;
 
+    // Oscillation detection + tabu window: track recent state keys.
+    // • If the same key appears OSC_LIMIT times in the last OSC_WINDOW
+    //   steps, we're stuck and terminate.
+    // • The last TABU_WINDOW keys are passed to inner_search as a
+    //   recency set; any successor hashing to one of them pays
+    //   TABU_PENALTY on its step cost. This forces the planner to
+    //   commit past 2-cycles in local minima rather than shuffle
+    //   back and forth.
+    static constexpr int OSC_WINDOW  = 20;
+    static constexpr int OSC_LIMIT   = 5;
+    static constexpr int TABU_WINDOW = 8;
+    std::deque<StateKey> recent_keys;
+
+    // LRTA* learned lower bounds on cost-to-go, keyed by quantized state.
+    // After each outer step we back up the best f-value returned by the
+    // horizon-limited search. Each such f = g(path) + eps*h(leaf) is an
+    // (eps-)admissible estimate of true cost-to-go from the state we
+    // searched FROM; taking max with any previous value only tightens
+    // the bound and cannot break admissibility. This is what breaks
+    // oscillation in dead-end regions: each revisit of a local minimum
+    // raises its h value until the planner prefers an alternate route.
+    LearnedH learned;
+
     for (int step = 0; step < max_steps; step++) {
         if (at_goal(s, m)) {
             std::cout << "Reached goal at step " << step << "\n";
             break;
         }
-        SearchResult r = inner_search(s, m, P);
+
+        // Oscillation check.
+        StateKey cur_key = make_key(s, P);
+        recent_keys.push_back(cur_key);
+        if ((int)recent_keys.size() > OSC_WINDOW) recent_keys.pop_front();
+        if ((int)recent_keys.size() == OSC_WINDOW) {
+            int repeats = 0;
+            for (auto& k : recent_keys) if (k == cur_key) repeats++;
+            if (repeats >= OSC_LIMIT) {
+                std::cout << "Oscillation detected at step " << step
+                          << " — state repeated " << repeats << "x in last "
+                          << OSC_WINDOW << " steps. Terminating.\n";
+                break;
+            }
+        }
+
+        // Build the tabu set from the last TABU_WINDOW visited keys.
+        TabuSet tabu;
+        int tabu_start = std::max(0, (int)recent_keys.size() - TABU_WINDOW);
+        for (int k = tabu_start; k < (int)recent_keys.size(); k++) {
+            tabu.insert(recent_keys[k]);
+        }
+
+        SearchResult r = inner_search(s, m, P, G, learned, tabu);
         total_expansions += r.expansions;
         if (!r.found) {
             std::cout << "No feasible action from step " << step
@@ -710,6 +890,19 @@ int main(int argc, char** argv) {
             }
             break;
         }
+
+        // LRTA* Bellman backup. r.best_f is the best (eps-inflated) cost
+        // of any path found within the horizon from `s`. Deflate by eps
+        // to recover an admissible lower bound on true cost-to-go from s,
+        // then take max with any previously learned value. On subsequent
+        // visits to `s` (or anything hashing to the same key), heuristic()
+        // returns this inflated value, steering the planner away from
+        // revisited local minima.
+        double backed_up = r.best_f / std::max(1e-9, P.eps);
+        auto le = learned.find(cur_key);
+        double prev = (le != learned.end()) ? le->second : 0.0;
+        learned[cur_key] = std::max(prev, backed_up);
+
         double step_cost = transition_cost(s, r.first_next, ACTIONS[r.first_action_idx], P, m.terrain);
         total_cost += step_cost;
         s = r.first_next;

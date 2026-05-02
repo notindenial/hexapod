@@ -1,0 +1,21 @@
+# Two N-S trenches (negative Gaussian, depth -35 mm, sigma 20 mm) at
+# x = -100, +200 mm. The robot must stride over each trench —
+# feet that land in the dip incur elevation-change cost and shift the
+# body height, testing stability under uneven foot placement.
+name: gaps
+grid:
+  nx: 40
+  ny: 30
+  cell_size_mm: 20.0
+  origin_x_mm: -390.0
+  origin_y_mm: -290.0
+
+start:
+  x_mm: -300.0
+  y_mm: 0.0
+  yaw_deg: 0.0
+
+goal:
+  x_mm: 300.0
+  y_mm: 0.0
+  tolerance_mm: 40.0

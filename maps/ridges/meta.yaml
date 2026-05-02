@@ -1,0 +1,21 @@
+# Three Gaussian ridges running N-S (full Y span) at x = -150, 0, +150 mm.
+# Each ridge is 40 mm peak, ~20 mm sigma in X — steppable but costly.
+# The planner must cross all three; elevation cost steers it toward the
+# lowest crossing points and rewards careful foot placement.
+name: ridges
+grid:
+  nx: 40
+  ny: 30
+  cell_size_mm: 20.0
+  origin_x_mm: -390.0
+  origin_y_mm: -290.0
+
+start:
+  x_mm: -300.0
+  y_mm: 0.0
+  yaw_deg: 0.0
+
+goal:
+  x_mm: 300.0
+  y_mm: 0.0
+  tolerance_mm: 40.0

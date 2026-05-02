@@ -189,6 +189,10 @@ def render_animation(m, steps, meta, gif_path: str, fps: int = 4, n_interp: int 
     if n_interp > 1:
         steps = interpolate_steps(steps, n_interp=n_interp)
 
+    # Hold on the final pose for ~1 second so the robot appears to arrive.
+    hold_frames = max(1, fps)
+    steps = steps + [steps[-1]] * hold_frames
+
     fig, ax = plt.subplots(figsize=(10, 6.5))
     im = draw_terrain(ax, m, title=f"Plan: {m['name']}")
     plt.colorbar(im, ax=ax, label="elevation (mm)")
